@@ -371,7 +371,16 @@ function broadcast(data) {
 // Update total players count
 function updateTotalPlayers() {
   gameState.totalPlayers = connectedPlayers.size;
-  console.log(`Broadcasting player count update: ${connectedPlayers.size}`);
+  console.log(`Total connected players: ${connectedPlayers.size}`);
+  
+  // Log active connections for debugging
+  if (connectedPlayers.size > 0) {
+    console.log('Active connections:');
+    connectedPlayers.forEach((player, id) => {
+      console.log(`  - Player ${id}: ${player.username} (${player.ip})`);
+    });
+  }
+  
   broadcast({
     type: 'PLAYER_COUNT_UPDATE',
     totalPlayers: connectedPlayers.size
@@ -421,7 +430,8 @@ async function updatePlayerStats(playerId, username, won) {
 // Game timer logic
 function startGameTimer() {
   const timer = setInterval(() => {
-    if (gameState.timeLeft > 0) {
+    // Main game phase (10 seconds countdown)
+    if (!gameState.showingResults && gameState.timeLeft > 0) {
       gameState.timeLeft--;
       
       // Lock choices at 3 seconds
@@ -433,8 +443,8 @@ function startGameTimer() {
         });
       }
       
-      // Show results at 1 second
-      if (gameState.timeLeft === 1) {
+      // Show results at 0 seconds
+      if (gameState.timeLeft === 0) {
         const leftCount = gameState.leftChoices.length;
         const rightCount = gameState.rightChoices.length;
         const total = leftCount + rightCount;
@@ -448,6 +458,8 @@ function startGameTimer() {
         };
         
         gameState.gameEnded = true;
+        gameState.showingResults = true;
+        gameState.timeLeftAfterResult = 3; // Reset post-result timer
         
         // Record game results to database
         const winners = [];
@@ -475,17 +487,30 @@ function startGameTimer() {
         });
       }
       
+      // Broadcast main timer update
       broadcast({
         type: 'TIMER_UPDATE',
-        timeLeft: gameState.timeLeft
+        timeLeft: gameState.timeLeft,
+        showingResults: gameState.showingResults
       });
-    } else {
-      // Reset for next round
-      clearInterval(timer);
-      setTimeout(() => {
+    }
+    // Post-result countdown phase (3, 2, 1)
+    else if (gameState.showingResults && gameState.timeLeftAfterResult > 0) {
+      gameState.timeLeftAfterResult--;
+      
+      // Broadcast post-result timer update
+      broadcast({
+        type: 'POST_RESULT_TIMER',
+        timeLeftAfterResult: gameState.timeLeftAfterResult,
+        showingResults: gameState.showingResults
+      });
+      
+      // Start new round when countdown reaches 0
+      if (gameState.timeLeftAfterResult === 0) {
+        clearInterval(timer);
         resetGame();
         startGameTimer();
-      }, 3000); // 3 second pause between rounds
+      }
     }
   }, 1000);
 }
@@ -494,18 +519,22 @@ function resetGame() {
   gameState = {
     currentRound: gameState.currentRound + 1,
     timeLeft: 10,
+    timeLeftAfterResult: 3,
     isActive: true,
     leftChoices: [],
     rightChoices: [],
     totalPlayers: connectedPlayers.size,
     currentImage: `image-${Math.floor(Math.random() * 5) + 1}.jpg`,
-    gameEnded: false
+    gameEnded: false,
+    showingResults: false
   };
   
   // Reset all player choices
   connectedPlayers.forEach(player => {
     player.choice = null;
   });
+  
+  console.log(`Starting new round ${gameState.currentRound}`);
   
   broadcast({
     type: 'NEW_ROUND',
@@ -514,13 +543,18 @@ function resetGame() {
 }
 
 // WebSocket connection handling
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
   const playerId = Date.now() + Math.random();
+  const clientIP = req.socket.remoteAddress;
+  
+  console.log(`New WebSocket connection from ${clientIP}`);
   
   connectedPlayers.set(playerId, {
     ws,
     choice: null,
-    username: `Player_${Math.floor(Math.random() * 1000)}`
+    username: `Player_${Math.floor(Math.random() * 1000)}`,
+    connectedAt: new Date(),
+    ip: clientIP
   });
   
   console.log(`Player ${playerId} connected. Total players: ${connectedPlayers.size}`);
@@ -611,6 +645,22 @@ wss.on('connection', (ws) => {
     }
   });
 });
+
+// Periodic cleanup of dead connections
+setInterval(() => {
+  let removedCount = 0;
+  connectedPlayers.forEach((player, playerId) => {
+    if (player.ws.readyState === WebSocket.CLOSED) {
+      connectedPlayers.delete(playerId);
+      removedCount++;
+    }
+  });
+  
+  if (removedCount > 0) {
+    console.log(`Cleaned up ${removedCount} dead connections`);
+    updateTotalPlayers();
+  }
+}, 30000); // Check every 30 seconds
 
 // Start the game timer
 startGameTimer();
